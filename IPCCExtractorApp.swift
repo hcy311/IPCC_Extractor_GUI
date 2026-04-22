@@ -1,6 +1,7 @@
 import SwiftUI
 import Foundation
 import AppKit
+import UniformTypeIdentifiers
 
 enum DownloadMode: String, CaseIterable, Identifiable {
     case latestRelease
@@ -137,6 +138,7 @@ final class AppViewModel: ObservableObject {
     @Published var isManagingIpsw = false
     @Published var ipswHealth: IPSWHealth = .checking
     @Published var showIpswInstallAlert = false
+    @Published var showIpswOutdatedAlert = false
 
     private let fileManager = FileManager.default
     private var runningProcess: Process?
@@ -224,6 +226,7 @@ final class AppViewModel: ObservableObject {
     func refreshDeviceAndBuilds() {
         guard !isRefreshing else { return }
         isRefreshing = true
+        ipswHealth = .checking
         statusText = tr(
             "正在获取机型和版本信息...",
             "正在取得機型與版本資訊...",
@@ -310,6 +313,9 @@ final class AppViewModel: ObservableObject {
                         "No se encontró ipsw en el sistema."
                     ))
                     self.showIpswInstallAlert = true
+                }
+                if health == .outdated {
+                    self.showIpswOutdatedAlert = true
                 }
                 if stable.isEmpty || beta.isEmpty {
                     self.appendLog(self.tr(
@@ -434,7 +440,7 @@ final class AppViewModel: ObservableObject {
         guard !ipswPath.isEmpty else { return .missing }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-lc", "if command -v brew >/dev/null 2>&1; then brew outdated ipsw >/dev/null 2>&1; code=$?; if [ $code -eq 0 ]; then echo outdated; elif [ $code -eq 1 ]; then echo current; else echo unknown; fi; else echo unknown; fi"]
+        process.arguments = ["-lc", "if command -v brew >/dev/null 2>&1; then brew outdated ipsw --json=v2 2>/dev/null; else echo '{\"formulae\":[],\"casks\":[]}'; fi"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()
@@ -445,15 +451,15 @@ final class AppViewModel: ObservableObject {
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        switch output {
-        case "outdated":
-            return .outdated
-        case "current":
-            return .current
-        default:
+        guard process.terminationStatus == 0,
+              let output = String(data: data, encoding: .utf8),
+              let jsonData = output.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
             return .unknown
         }
+        let formulae = json["formulae"] as? [[String: Any]] ?? []
+        let casks = json["casks"] as? [[String: Any]] ?? []
+        return (formulae.isEmpty && casks.isEmpty) ? .current : .outdated
     }
 
     private static func runTool(arguments: [String], appHomeURL: URL) -> String? {
@@ -486,11 +492,18 @@ final class AppViewModel: ObservableObject {
     }
 
     private static func queryLatest(for device: String, beta: Bool, appHomeURL: URL) -> String? {
+        let osName = device.lowercased().hasPrefix("ipad") ? "iPadOS" : "iOS"
         let args = beta
-            ? ["download", "appledb", "--show-latest", "--json", "--os", "iOS", "--device", device, "--beta"]
-            : ["download", "appledb", "--show-latest", "--json", "--os", "iOS", "--device", device, "--release"]
+            ? ["download", "appledb", "--show-latest", "--os", osName, "--device", device, "--beta"]
+            : ["download", "appledb", "--show-latest", "--os", osName, "--device", device, "--release"]
         guard let output = runTool(arguments: args, appHomeURL: appHomeURL) else { return nil }
-        guard let data = output.data(using: .utf8),
+        guard let start = output.firstIndex(of: "{"),
+              let end = output.lastIndex(of: "}"),
+              start <= end else {
+            return nil
+        }
+        let payload = String(output[start...end])
+        guard let data = payload.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) else {
             return nil
         }
@@ -527,7 +540,9 @@ final class AppViewModel: ObservableObject {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = []
+        if let ipswType = UTType(filenameExtension: "ipsw") {
+            panel.allowedContentTypes = [ipswType]
+        }
         panel.prompt = tr("选择 IPSW", "選擇 IPSW", "Choose IPSW", "IPSW を選択", "IPSW 선택", "Choisir l’IPSW", "Elegir IPSW")
         if panel.runModal() == .OK, let url = panel.url {
             selectedIPSWPath = url.path
@@ -711,6 +726,41 @@ struct AnimatedStatusDot: View {
     }
 }
 
+enum AppHelp {
+    static func openBundledResource(_ name: String) {
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent(name) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    static func showInstallGuide() {
+        let alert = NSAlert()
+        alert.messageText = "IPCC Install Guide"
+        alert.informativeText = """
+        1. Connect your iPhone to the Mac.
+        2. Unlock the device and trust this computer.
+        3. Open Finder and select the device in the sidebar.
+        4. Stay on the General page.
+        5. Hold Option and click Check for Update...
+        6. Choose the target .ipcc file from the output folder.
+        """
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    static func showIpswStatusGuide() {
+        let alert = NSAlert()
+        alert.messageText = "ipsw Status Guide"
+        alert.informativeText = """
+        Green: ipsw is installed and Homebrew does not report an update.
+        Yellow: ipsw is installed and Homebrew reports an available update.
+        Red: ipsw is not installed or was not found on the system.
+        Gray: status is still being checked or could not be determined.
+        """
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+}
+
 struct ContentView: View {
     @StateObject private var model = AppViewModel()
     @Environment(\.colorScheme) private var colorScheme
@@ -751,6 +801,33 @@ struct ContentView: View {
                 "시스템 ipsw를 찾지 못했습니다. 설치 전까지 일부 기능을 사용할 수 없습니다.",
                 "Aucun ipsw système n’a été trouvé. Certaines fonctions resteront indisponibles tant qu’il n’est pas installé.",
                 "No se encontró ipsw en el sistema. Varias funciones no estarán disponibles hasta instalarlo."
+            ))
+        }
+        .alert(
+            model.tr(
+                "ipsw 可能需要升级",
+                "ipsw 可能需要升級",
+                "ipsw may need an update",
+                "ipsw の更新が必要かもしれません",
+                "ipsw 업데이트가 필요할 수 있습니다",
+                "ipsw peut nécessiter une mise à jour",
+                "ipsw puede necesitar una actualización"
+            ),
+            isPresented: $model.showIpswOutdatedAlert
+        ) {
+            Button(model.tr("升级", "升級", "Update", "更新", "업데이트", "Mettre à jour", "Actualizar")) {
+                model.installOrUpdateIpsw()
+            }
+            Button(model.tr("稍后", "稍後", "Later", "あとで", "나중에", "Plus tard", "Más tarde"), role: .cancel) { }
+        } message: {
+            Text(model.tr(
+                "检测到系统里的 ipsw 可能不是最新版本。你可以稍后继续用，也可以现在升级。",
+                "偵測到系統中的 ipsw 可能不是最新版本。你可以稍後繼續用，也可以現在升級。",
+                "The system ipsw may not be current. You can keep using it for now or update it now.",
+                "システムの ipsw が最新ではない可能性があります。後で使い続けることも、今更新することもできます。",
+                "시스템 ipsw가 최신이 아닐 수 있습니다. 나중에 계속 사용하거나 지금 업데이트할 수 있습니다.",
+                "La version système de ipsw n’est peut-être pas à jour. Tu peux continuer ainsi ou lancer la mise à jour maintenant.",
+                "Es posible que el ipsw del sistema no esté actualizado. Puedes seguir usándolo o actualizarlo ahora."
             ))
         }
     }
@@ -814,30 +891,38 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                        HStack {
-                            Picker(model.tr("设备类型", "裝置類型", "Device type", "デバイスタイプ", "기기 유형", "Type d’appareil", "Tipo de dispositivo"), selection: $model.deviceFamily) {
-                                Text(DeviceFamily.iPhone.displayName).tag(DeviceFamily.iPhone)
-                                Text(DeviceFamily.iPad.displayName).tag(DeviceFamily.iPad)
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 220)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(model.tr("设备类型", "裝置類型", "Device type", "デバイスタイプ", "기기 유형", "Type d’appareil", "Tipo de dispositivo"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack(alignment: .center, spacing: 10) {
+                                Picker("", selection: $model.deviceFamily) {
+                                    Text(DeviceFamily.iPhone.displayName).tag(DeviceFamily.iPhone)
+                                    Text(DeviceFamily.iPad.displayName).tag(DeviceFamily.iPad)
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.segmented)
+                                .frame(width: 250)
+                                .fixedSize(horizontal: true, vertical: false)
 
-                            TextField(
-                                model.tr(
-                                    "型号编号，例如 18,2",
-                                    "型號編號，例如 18,2",
-                                    "Model suffix, e.g. 18,2",
-                                    "型番番号 例: 18,2",
-                                    "모델 접미사 예: 18,2",
-                                    "Suffixe du modèle, ex. 18,2",
-                                    "Sufijo del modelo, ej. 18,2"
-                                ),
-                                text: $model.deviceSuffix
-                            )
-                            .textFieldStyle(.roundedBorder)
+                                TextField(
+                                    model.tr(
+                                        "型号编号，例如 18,2",
+                                        "型號編號，例如 18,2",
+                                        "Model suffix, e.g. 18,2",
+                                        "型番番号 例: 18,2",
+                                        "모델 접미사 예: 18,2",
+                                        "Suffixe du modèle, ex. 18,2",
+                                        "Sufijo del modelo, ej. 18,2"
+                                    ),
+                                    text: $model.deviceSuffix
+                                )
+                                .textFieldStyle(.roundedBorder)
+                                .frame(minWidth: 115)
 
-                            Button(model.tr("自动识别", "自動識別", "Detect", "自動検出", "자동 감지", "Détecter", "Detectar")) {
-                                model.refreshDeviceAndBuilds()
+                                Button(model.tr("自动识别", "自動識別", "Detect", "自動検出", "자동 감지", "Détecter", "Detectar")) {
+                                    model.refreshDeviceAndBuilds()
+                                }
                             }
                         }
 
@@ -1073,6 +1158,27 @@ struct IPCCExtractorApp: App {
         WindowGroup {
             ContentView()
                 .preferredColorScheme(nil)
+        }
+        .commands {
+            CommandGroup(after: .help) {
+                Button("Quick Install Guide / 安装指引") {
+                    AppHelp.showInstallGuide()
+                }
+
+                Button("ipsw Status Guide / 状态说明") {
+                    AppHelp.showIpswStatusGuide()
+                }
+
+                Divider()
+
+                Button("Open English README") {
+                    AppHelp.openBundledResource("README.md")
+                }
+
+                Button("打开简体中文 README") {
+                    AppHelp.openBundledResource("README.zh-CN.md")
+                }
+            }
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)

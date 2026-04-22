@@ -1,5 +1,6 @@
 .DS_Store
 .buildcache/
 .tmp_home/
+.tmp_probe_home/
 ipcc_extractor_bin_test
 IPCC Extractor.app/Contents/Resources/.ipsw_app_home/

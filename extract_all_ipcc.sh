@@ -210,13 +210,23 @@ prompt_download_mode() {
     esac
 }
 
+target_os_for_device() {
+    local device="$1"
+    case "$device" in
+        iPad*) echo "iPadOS" ;;
+        *) echo "iOS" ;;
+    esac
+}
+
 build_download_command() {
     local device="$1"
     local mode="$2"
     local version="$3"
     local build="$4"
+    local target_os
+    target_os="$(target_os_for_device "$device")"
 
-    local cmd=("$IPSW_TOOL" download appledb --os iOS --device "$device")
+    local cmd=("$IPSW_TOOL" download appledb --os "$target_os" --device "$device")
     case "$mode" in
         1) cmd+=(--latest --release) ;;
         2) cmd+=(--beta --latest) ;;
