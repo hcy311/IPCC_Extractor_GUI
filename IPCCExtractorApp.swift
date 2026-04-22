@@ -11,6 +11,41 @@ enum DownloadMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum DeviceFamily: String, CaseIterable, Identifiable {
+    case iPhone
+    case iPad
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .iPhone: return "iPhone"
+        case .iPad: return "Cellular iPad"
+        }
+    }
+}
+
+enum IPSWHealth {
+    case missing
+    case outdated
+    case current
+    case checking
+    case unknown
+
+    var color: Color {
+        switch self {
+        case .missing:
+            return .red
+        case .outdated:
+            return .yellow
+        case .current:
+            return .green
+        case .checking, .unknown:
+            return .gray
+        }
+    }
+}
+
 enum AppLanguage: String, CaseIterable, Identifiable {
     case auto
     case zhHans
@@ -82,7 +117,9 @@ struct L10n {
 
 final class AppViewModel: ObservableObject {
     @Published var language: AppLanguage = .auto
-    @Published var deviceCode = ""
+    @Published var deviceFamily: DeviceFamily = .iPhone
+    @Published var deviceSuffix = ""
+    @Published var selectedIPSWPath = ""
     @Published var mode: DownloadMode = .latestRelease
     @Published var versionInput = ""
     @Published var buildInput = ""
@@ -98,12 +135,15 @@ final class AppViewModel: ObservableObject {
     @Published var statusText = "Ready"
     @Published var resolvedIpswPath = ""
     @Published var isManagingIpsw = false
+    @Published var ipswHealth: IPSWHealth = .checking
+    @Published var showIpswInstallAlert = false
 
     private let fileManager = FileManager.default
     private var runningProcess: Process?
 
     init() {
-        outputFolder = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Documents/IPSW").path
+        let defaultFolder = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("IPCC_Extractor", isDirectory: true)
+        outputFolder = defaultFolder.path
         resolvedIpswPath = Self.findIpswBinary() ?? ""
         statusText = tr(
             "就绪",
@@ -118,6 +158,11 @@ final class AppViewModel: ObservableObject {
 
     var effectiveLanguage: AppLanguage {
         language == .auto ? L10n.detectSystemLanguage() : language
+    }
+
+    var deviceCode: String {
+        let trimmed = deviceSuffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "" : "\(deviceFamily.rawValue)\(trimmed)"
     }
 
     var coreScriptURL: URL {
@@ -150,6 +195,32 @@ final class AppViewModel: ObservableObject {
         try? fileManager.createDirectory(at: appHomeURL, withIntermediateDirectories: true)
     }
 
+    func defaultLogFileURL() -> URL {
+        let base = URL(fileURLWithPath: outputFolder, isDirectory: true)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return base.appendingPathComponent("ipcc_extractor_\(formatter.string(from: Date())).log")
+    }
+
+    func writeLogSnapshot() {
+        guard !logText.isEmpty else { return }
+        try? fileManager.createDirectory(atPath: outputFolder, withIntermediateDirectories: true)
+        try? logText.write(to: defaultLogFileURL(), atomically: true, encoding: .utf8)
+    }
+
+    func updateDevice(from fullCode: String) {
+        let trimmed = fullCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("ipad") {
+            deviceFamily = .iPad
+            deviceSuffix = String(trimmed.dropFirst("iPad".count))
+        } else if trimmed.lowercased().hasPrefix("iphone") {
+            deviceFamily = .iPhone
+            deviceSuffix = String(trimmed.dropFirst("iPhone".count))
+        } else {
+            deviceSuffix = trimmed
+        }
+    }
+
     func refreshDeviceAndBuilds() {
         guard !isRefreshing else { return }
         isRefreshing = true
@@ -173,11 +244,13 @@ final class AppViewModel: ObservableObject {
             let stable = target.isEmpty ? "" : (Self.queryLatest(for: target, beta: false, appHomeURL: appHomeURL) ?? "")
             let beta = target.isEmpty ? "" : (Self.queryLatest(for: target, beta: true, appHomeURL: appHomeURL) ?? "")
             let ipswPath = Self.findIpswBinary() ?? ""
+            let health = Self.detectIpswHealth(ipswPath: ipswPath)
 
             await MainActor.run {
                 self.resolvedIpswPath = ipswPath
+                self.ipswHealth = health
                 if !detected.isEmpty {
-                    self.deviceCode = detected
+                    self.updateDevice(from: detected)
                 }
                 self.latestStable = stable
                 self.latestBeta = beta
@@ -225,6 +298,28 @@ final class AppViewModel: ObservableObject {
                         "시스템 ipsw 사용 중: \(ipswPath)",
                         "Utilise le binaire système ipsw : \(ipswPath)",
                         "Usando el binario del sistema ipsw: \(ipswPath)"
+                    ))
+                } else {
+                    self.appendLog(self.tr(
+                        "未检测到系统 ipsw。",
+                        "未檢測到系統 ipsw。",
+                        "System ipsw was not found.",
+                        "システムの ipsw が見つかりません。",
+                        "시스템 ipsw를 찾지 못했습니다.",
+                        "Le binaire système ipsw est introuvable.",
+                        "No se encontró ipsw en el sistema."
+                    ))
+                    self.showIpswInstallAlert = true
+                }
+                if stable.isEmpty || beta.isEmpty {
+                    self.appendLog(self.tr(
+                        "版本查询未返回有效结果，可能是网络、AppleDB 或 ipsw 本地缓存问题。",
+                        "版本查詢未返回有效結果，可能是網路、AppleDB 或 ipsw 本機快取問題。",
+                        "Version lookup did not return a valid result. This may be caused by network, AppleDB, or local ipsw cache issues.",
+                        "バージョン取得に有効な結果が返りませんでした。ネットワーク、AppleDB、または ipsw のローカルキャッシュが原因の可能性があります。",
+                        "버전 조회 결과가 유효하지 않습니다. 네트워크, AppleDB 또는 ipsw 로컬 캐시 문제일 수 있습니다.",
+                        "La recherche de version n’a pas renvoyé de résultat valide. Cela peut venir du réseau, d’AppleDB ou du cache local de ipsw.",
+                        "La consulta de versión no devolvió un resultado válido. Puede deberse a la red, AppleDB o la caché local de ipsw."
                     ))
                 }
             }
@@ -282,6 +377,7 @@ final class AppViewModel: ObservableObject {
                 self?.statusText = proc.terminationStatus == 0
                     ? (self?.tr("ipsw 已就绪", "ipsw 已就緒", "ipsw is ready", "ipsw の準備完了", "ipsw 준비 완료", "ipsw est prêt", "ipsw está listo") ?? "ipsw is ready")
                     : (self?.tr("ipsw 处理失败", "ipsw 處理失敗", "ipsw update failed", "ipsw の更新失敗", "ipsw 업데이트 실패", "Échec de la mise à jour de ipsw", "Falló la actualización de ipsw") ?? "ipsw update failed")
+                self?.writeLogSnapshot()
                 self?.refreshDeviceAndBuilds()
             }
         }
@@ -334,6 +430,32 @@ final class AppViewModel: ObservableObject {
         return output
     }
 
+    private static func detectIpswHealth(ipswPath: String) -> IPSWHealth {
+        guard !ipswPath.isEmpty else { return .missing }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-lc", "if command -v brew >/dev/null 2>&1; then brew outdated ipsw >/dev/null 2>&1; code=$?; if [ $code -eq 0 ]; then echo outdated; elif [ $code -eq 1 ]; then echo current; else echo unknown; fi; else echo unknown; fi"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return .unknown
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        switch output {
+        case "outdated":
+            return .outdated
+        case "current":
+            return .current
+        default:
+            return .unknown
+        }
+    }
+
     private static func runTool(arguments: [String], appHomeURL: URL) -> String? {
         guard let ipsw = findIpswBinary() else { return nil }
         let process = Process()
@@ -365,11 +487,68 @@ final class AppViewModel: ObservableObject {
 
     private static func queryLatest(for device: String, beta: Bool, appHomeURL: URL) -> String? {
         let args = beta
-            ? ["download", "appledb", "--show-latest", "--os", "iOS", "--device", device, "--beta"]
-            : ["download", "appledb", "--show-latest", "--os", "iOS", "--device", device, "--release"]
+            ? ["download", "appledb", "--show-latest", "--json", "--os", "iOS", "--device", device, "--beta"]
+            : ["download", "appledb", "--show-latest", "--json", "--os", "iOS", "--device", device, "--release"]
         guard let output = runTool(arguments: args, appHomeURL: appHomeURL) else { return nil }
-        let lines = output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        return lines.last
+        guard let data = output.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) else {
+            return nil
+        }
+
+        func flatten(_ object: Any) -> [[String: Any]] {
+            if let array = object as? [Any] {
+                return array.flatMap { flatten($0) }
+            }
+            if let dict = object as? [String: Any] {
+                return [dict] + dict.values.flatMap { flatten($0) }
+            }
+            return []
+        }
+
+        let candidates = flatten(json)
+        for dict in candidates {
+            let version = dict["version"] as? String
+            let build = dict["build"] as? String ?? dict["buildid"] as? String ?? dict["buildId"] as? String
+            if let version, let build {
+                return "\(version) (\(build))"
+            }
+            if let version {
+                return version
+            }
+            if let build {
+                return build
+            }
+        }
+        return nil
+    }
+
+    func chooseLocalIPSW() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = []
+        panel.prompt = tr("选择 IPSW", "選擇 IPSW", "Choose IPSW", "IPSW を選択", "IPSW 선택", "Choisir l’IPSW", "Elegir IPSW")
+        if panel.runModal() == .OK, let url = panel.url {
+            selectedIPSWPath = url.path
+            if deviceCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let fileName = url.deletingPathExtension().lastPathComponent
+                if let prefix = fileName.split(separator: "_").first, prefix.lowercased().hasPrefix("iphone") {
+                    updateDevice(from: String(prefix))
+                } else if let prefix = fileName.split(separator: "_").first, prefix.lowercased().hasPrefix("ipad") {
+                    updateDevice(from: String(prefix))
+                }
+            }
+            appendLog(tr(
+                "已选择本地 IPSW: \(url.path)",
+                "已選擇本機 IPSW: \(url.path)",
+                "Selected local IPSW: \(url.path)",
+                "ローカル IPSW を選択: \(url.path)",
+                "로컬 IPSW 선택됨: \(url.path)",
+                "IPSW local sélectionné : \(url.path)",
+                "IPSW local seleccionado: \(url.path)"
+            ))
+        }
     }
 
     func runExtraction() {
@@ -433,11 +612,13 @@ final class AppViewModel: ObservableObject {
         env["DOWNLOAD_MODE_OVERRIDE"] = modeValue(mode)
         env["VERSION_INPUT_OVERRIDE"] = versionInput
         env["BUILD_INPUT_OVERRIDE"] = buildInput
+        env["LOCAL_IPSW_FILE_OVERRIDE"] = selectedIPSWPath
         env["AUTO_CONFIRM_OVERRIDE"] = "y"
         env["CLEAN_CONFIRM_OVERRIDE"] = cleanOnly ? "y" : "n"
         env["DELETE_IPSW_OVERRIDE"] = deleteIPSW ? "y" : "n"
         env["OPEN_FINAL_DIR_OVERRIDE"] = openOutput ? "y" : "n"
         process.environment = env
+        try? fileManager.createDirectory(atPath: outputFolder, withIntermediateDirectories: true)
         process.currentDirectoryURL = URL(fileURLWithPath: outputFolder)
 
         let pipe = Pipe()
@@ -458,6 +639,7 @@ final class AppViewModel: ObservableObject {
                 self?.statusText = proc.terminationStatus == 0
                     ? (self?.tr("完成", "完成", "Done", "完了", "완료", "Terminé", "Terminado") ?? "Done")
                     : (self?.tr("执行失败", "執行失敗", "Failed", "失敗", "실패", "Échec", "Falló") ?? "Failed")
+                self?.writeLogSnapshot()
                 self?.runningProcess = nil
             }
         }
@@ -485,6 +667,20 @@ final class AppViewModel: ObservableObject {
         runningProcess = nil
         isRunning = false
         statusText = tr("已停止", "已停止", "Stopped", "停止済み", "중지됨", "Arrêté", "Detenido")
+        writeLogSnapshot()
+    }
+
+    func chooseOutputFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: outputFolder)
+        panel.prompt = tr("选择输出目录", "選擇輸出資料夾", "Choose output folder", "出力フォルダを選択", "출력 폴더 선택", "Choisir le dossier de sortie", "Elegir carpeta de salida")
+        if panel.runModal() == .OK, let url = panel.url {
+            outputFolder = url.path
+        }
     }
 
     private func modeValue(_ mode: DownloadMode) -> String {
@@ -529,6 +725,33 @@ struct ContentView: View {
         .background(backgroundGradient)
         .onAppear {
             model.refreshDeviceAndBuilds()
+        }
+        .alert(
+            model.tr(
+                "未检测到 ipsw",
+                "未檢測到 ipsw",
+                "ipsw not found",
+                "ipsw が見つかりません",
+                "ipsw를 찾을 수 없습니다",
+                "ipsw introuvable",
+                "ipsw no encontrado"
+            ),
+            isPresented: $model.showIpswInstallAlert
+        ) {
+            Button(model.tr("安装 / 升级", "安裝 / 升級", "Install / Update", "インストール / 更新", "설치 / 업데이트", "Installer / Mettre à jour", "Instalar / Actualizar")) {
+                model.installOrUpdateIpsw()
+            }
+            Button(model.tr("稍后", "稍後", "Later", "あとで", "나중에", "Plus tard", "Más tarde"), role: .cancel) { }
+        } message: {
+            Text(model.tr(
+                "系统里没有检测到 ipsw，很多功能会不可用。建议先安装。",
+                "系統中沒有偵測到 ipsw，很多功能會不可用。建議先安裝。",
+                "No system ipsw was found. Several features will not work until it is installed.",
+                "システムに ipsw が見つかりません。インストールするまで一部機能は使えません。",
+                "시스템 ipsw를 찾지 못했습니다. 설치 전까지 일부 기능을 사용할 수 없습니다.",
+                "Aucun ipsw système n’a été trouvé. Certaines fonctions resteront indisponibles tant qu’il n’est pas installé.",
+                "No se encontró ipsw en el sistema. Varias funciones no estarán disponibles hasta instalarlo."
+            ))
         }
     }
 
@@ -592,23 +815,56 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
 
                         HStack {
+                            Picker(model.tr("设备类型", "裝置類型", "Device type", "デバイスタイプ", "기기 유형", "Type d’appareil", "Tipo de dispositivo"), selection: $model.deviceFamily) {
+                                Text(DeviceFamily.iPhone.displayName).tag(DeviceFamily.iPhone)
+                                Text(DeviceFamily.iPad.displayName).tag(DeviceFamily.iPad)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 220)
+
                             TextField(
                                 model.tr(
-                                    "机型代号，例如 iPhone18,2",
-                                    "機型代號，例如 iPhone18,2",
-                                    "Device identifier, e.g. iPhone18,2",
-                                    "デバイス識別子 例: iPhone18,2",
-                                    "기기 식별자 예: iPhone18,2",
-                                    "Identifiant de l’appareil, ex. iPhone18,2",
-                                    "Identificador del dispositivo, ej. iPhone18,2"
+                                    "型号编号，例如 18,2",
+                                    "型號編號，例如 18,2",
+                                    "Model suffix, e.g. 18,2",
+                                    "型番番号 例: 18,2",
+                                    "모델 접미사 예: 18,2",
+                                    "Suffixe du modèle, ex. 18,2",
+                                    "Sufijo del modelo, ej. 18,2"
                                 ),
-                                text: $model.deviceCode
+                                text: $model.deviceSuffix
                             )
                             .textFieldStyle(.roundedBorder)
 
                             Button(model.tr("自动识别", "自動識別", "Detect", "自動検出", "자동 감지", "Détecter", "Detectar")) {
                                 model.refreshDeviceAndBuilds()
                             }
+                        }
+
+                        Text(model.deviceCode.isEmpty ? " " : model.deviceCode)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 10) {
+                            Button {
+                                model.chooseLocalIPSW()
+                            } label: {
+                                Label(model.tr("手动选择 IPSW", "手動選擇 IPSW", "Choose IPSW", "IPSW を手動選択", "IPSW 수동 선택", "Choisir un IPSW", "Elegir IPSW"), systemImage: "doc.badge.plus")
+                            }
+
+                            Button {
+                                model.selectedIPSWPath = ""
+                            } label: {
+                                Label(model.tr("清除", "清除", "Clear", "クリア", "지우기", "Effacer", "Limpiar"), systemImage: "xmark.circle")
+                            }
+                            .disabled(model.selectedIPSWPath.isEmpty)
+                        }
+
+                        if !model.selectedIPSWPath.isEmpty {
+                            Text(model.selectedIPSWPath)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
                         }
 
                         HStack(alignment: .top, spacing: 12) {
@@ -641,11 +897,25 @@ struct ContentView: View {
                         HStack {
                             Text(model.tr("输出目录", "輸出目錄", "Output folder", "出力フォルダ", "출력 폴더", "Dossier de sortie", "Carpeta de salida"))
                             Spacer()
-                            Text(model.outputFolder)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.trailing)
+                            Button(model.tr("选择", "選擇", "Choose", "選択", "선택", "Choisir", "Elegir")) {
+                                model.chooseOutputFolder()
+                            }
                         }
+                        Text(model.outputFolder)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.leading)
+                        Text(model.tr(
+                            "日志会自动保存在输出目录下，文件名格式为 ipcc_extractor_时间.log",
+                            "日誌會自動保存在輸出目錄下，檔名格式為 ipcc_extractor_時間.log",
+                            "Logs are automatically saved into the output folder as ipcc_extractor_TIMESTAMP.log",
+                            "ログは出力フォルダに ipcc_extractor_TIMESTAMP.log 形式で自動保存されます",
+                            "로그는 출력 폴더에 ipcc_extractor_TIMESTAMP.log 형식으로 자동 저장됩니다",
+                            "Les journaux sont enregistrés automatiquement dans le dossier de sortie au format ipcc_extractor_TIMESTAMP.log",
+                            "Los registros se guardan automáticamente en la carpeta de salida como ipcc_extractor_TIMESTAMP.log"
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
                 }
 
@@ -676,6 +946,22 @@ struct ContentView: View {
                         Text(model.resolvedIpswPath.isEmpty ? "ipsw: not found" : "ipsw: \(model.resolvedIpswPath)")
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(model.ipswHealth.color)
+                                .frame(width: 10, height: 10)
+                            Text(model.tr(
+                                model.ipswHealth == .missing ? "未安装" : model.ipswHealth == .outdated ? "需要升级" : model.ipswHealth == .current ? "已安装且较新" : model.ipswHealth == .checking ? "检测中" : "状态未知",
+                                model.ipswHealth == .missing ? "未安裝" : model.ipswHealth == .outdated ? "需要升級" : model.ipswHealth == .current ? "已安裝且較新" : model.ipswHealth == .checking ? "檢測中" : "狀態未知",
+                                model.ipswHealth == .missing ? "Not installed" : model.ipswHealth == .outdated ? "Needs update" : model.ipswHealth == .current ? "Installed and current" : model.ipswHealth == .checking ? "Checking" : "Unknown state",
+                                model.ipswHealth == .missing ? "未インストール" : model.ipswHealth == .outdated ? "更新が必要" : model.ipswHealth == .current ? "導入済み・比較的新しい" : model.ipswHealth == .checking ? "確認中" : "状態不明",
+                                model.ipswHealth == .missing ? "미설치" : model.ipswHealth == .outdated ? "업데이트 필요" : model.ipswHealth == .current ? "설치됨 / 최신" : model.ipswHealth == .checking ? "확인 중" : "상태 알 수 없음",
+                                model.ipswHealth == .missing ? "Non installé" : model.ipswHealth == .outdated ? "Mise à jour nécessaire" : model.ipswHealth == .current ? "Installé et à jour" : model.ipswHealth == .checking ? "Vérification..." : "État inconnu",
+                                model.ipswHealth == .missing ? "No instalado" : model.ipswHealth == .outdated ? "Necesita actualización" : model.ipswHealth == .current ? "Instalado y al día" : model.ipswHealth == .checking ? "Comprobando" : "Estado desconocido"
+                            ))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
                         Button {
                             model.installOrUpdateIpsw()
                         } label: {

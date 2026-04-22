@@ -6,6 +6,7 @@ LANG_MODE="${LANG_MODE:-zh}"
 IPSW_TOOL="${IPSW_TOOL:-/opt/homebrew/bin/ipsw}"
 WORK_ROOT="${WORK_ROOT:-$(pwd)}"
 BREW_TOOL="${BREW_TOOL:-/opt/homebrew/bin/brew}"
+LOCAL_IPSW_FILE="${LOCAL_IPSW_FILE_OVERRIDE:-}"
 
 msg() {
     case "${LANG_MODE}:$1" in
@@ -263,74 +264,83 @@ say title
 echo "=============================="
 echo ""
 
-prompt device_prompt
-DEVICE_CODE="${DEVICE_CODE_OVERRIDE:-}"
-if [ -z "$DEVICE_CODE" ]; then
-    read -r DEVICE_CODE
-else
-    echo "$DEVICE_CODE"
-fi
-if [ -z "$DEVICE_CODE" ]; then
-    echo "Device identifier cannot be empty."
-    exit 1
-fi
-
-DOWNLOAD_MODE="${DOWNLOAD_MODE_OVERRIDE:-}"
-if [ -z "$DOWNLOAD_MODE" ]; then
-    DOWNLOAD_MODE="$(prompt_download_mode)"
-fi
-VERSION_INPUT=""
-BUILD_INPUT=""
-
-if [ "$DOWNLOAD_MODE" = "3" ]; then
-    prompt version_prompt
-    VERSION_INPUT="${VERSION_INPUT_OVERRIDE:-}"
-    if [ -z "$VERSION_INPUT" ]; then
-        read -r VERSION_INPUT
-    else
-        echo "$VERSION_INPUT"
+if [ -n "$LOCAL_IPSW_FILE" ]; then
+    IPSW_FILE="$LOCAL_IPSW_FILE"
+    DEVICE_CODE="${DEVICE_CODE_OVERRIDE:-}"
+    if [ ! -f "$IPSW_FILE" ]; then
+        echo "Local IPSW file not found: $IPSW_FILE"
+        exit 1
     fi
-    [ -n "$VERSION_INPUT" ] || { echo "Version cannot be empty."; exit 1; }
-fi
-
-if [ "$DOWNLOAD_MODE" = "4" ]; then
-    prompt build_prompt
-    BUILD_INPUT="${BUILD_INPUT_OVERRIDE:-}"
-    if [ -z "$BUILD_INPUT" ]; then
-        read -r BUILD_INPUT
-    else
-        echo "$BUILD_INPUT"
-    fi
-    [ -n "$BUILD_INPUT" ] || { echo "Build number cannot be empty."; exit 1; }
-fi
-
-DOWNLOAD_CMD="$(build_download_command "$DEVICE_CODE" "$DOWNLOAD_MODE" "$VERSION_INPUT" "$BUILD_INPUT")"
-
-echo ""
-echo "$DOWNLOAD_CMD"
-CONFIRM="${AUTO_CONFIRM_OVERRIDE:-}"
-if [ -z "$CONFIRM" ]; then
-    prompt confirm_start
-    read -r CONFIRM
 else
-    echo "$CONFIRM"
-fi
-if ! answer_yes "$CONFIRM"; then
-    exit 0
-fi
+    prompt device_prompt
+    DEVICE_CODE="${DEVICE_CODE_OVERRIDE:-}"
+    if [ -z "$DEVICE_CODE" ]; then
+        read -r DEVICE_CODE
+    else
+        echo "$DEVICE_CODE"
+    fi
+    if [ -z "$DEVICE_CODE" ]; then
+        echo "Device identifier cannot be empty."
+        exit 1
+    fi
 
-cd "$WORK_ROOT"
-before_download="$(find "$WORK_ROOT" -maxdepth 1 -name '*.ipsw' -type f -print)"
-eval "$DOWNLOAD_CMD"
-after_download="$(find "$WORK_ROOT" -maxdepth 1 -name '*.ipsw' -type f -print)"
+    DOWNLOAD_MODE="${DOWNLOAD_MODE_OVERRIDE:-}"
+    if [ -z "$DOWNLOAD_MODE" ]; then
+        DOWNLOAD_MODE="$(prompt_download_mode)"
+    fi
+    VERSION_INPUT=""
+    BUILD_INPUT=""
 
-IPSW_FILE="$(comm -13 <(printf '%s\n' "$before_download" | sort) <(printf '%s\n' "$after_download" | sort) | head -1)"
-if [ -z "$IPSW_FILE" ]; then
-    IPSW_FILE="$(find "$WORK_ROOT" -maxdepth 1 -name "*${DEVICE_CODE}*.ipsw" -type f | sort | tail -1)"
-fi
-if [ -z "$IPSW_FILE" ] || [ ! -f "$IPSW_FILE" ]; then
-    echo "Failed to locate the downloaded IPSW."
-    exit 1
+    if [ "$DOWNLOAD_MODE" = "3" ]; then
+        prompt version_prompt
+        VERSION_INPUT="${VERSION_INPUT_OVERRIDE:-}"
+        if [ -z "$VERSION_INPUT" ]; then
+            read -r VERSION_INPUT
+        else
+            echo "$VERSION_INPUT"
+        fi
+        [ -n "$VERSION_INPUT" ] || { echo "Version cannot be empty."; exit 1; }
+    fi
+
+    if [ "$DOWNLOAD_MODE" = "4" ]; then
+        prompt build_prompt
+        BUILD_INPUT="${BUILD_INPUT_OVERRIDE:-}"
+        if [ -z "$BUILD_INPUT" ]; then
+            read -r BUILD_INPUT
+        else
+            echo "$BUILD_INPUT"
+        fi
+        [ -n "$BUILD_INPUT" ] || { echo "Build number cannot be empty."; exit 1; }
+    fi
+
+    DOWNLOAD_CMD="$(build_download_command "$DEVICE_CODE" "$DOWNLOAD_MODE" "$VERSION_INPUT" "$BUILD_INPUT")"
+
+    echo ""
+    echo "$DOWNLOAD_CMD"
+    CONFIRM="${AUTO_CONFIRM_OVERRIDE:-}"
+    if [ -z "$CONFIRM" ]; then
+        prompt confirm_start
+        read -r CONFIRM
+    else
+        echo "$CONFIRM"
+    fi
+    if ! answer_yes "$CONFIRM"; then
+        exit 0
+    fi
+
+    cd "$WORK_ROOT"
+    before_download="$(find "$WORK_ROOT" -maxdepth 1 -name '*.ipsw' -type f -print)"
+    eval "$DOWNLOAD_CMD"
+    after_download="$(find "$WORK_ROOT" -maxdepth 1 -name '*.ipsw' -type f -print)"
+
+    IPSW_FILE="$(comm -13 <(printf '%s\n' "$before_download" | sort) <(printf '%s\n' "$after_download" | sort) | head -1)"
+    if [ -z "$IPSW_FILE" ]; then
+        IPSW_FILE="$(find "$WORK_ROOT" -maxdepth 1 -name "*${DEVICE_CODE}*.ipsw" -type f | sort | tail -1)"
+    fi
+    if [ -z "$IPSW_FILE" ] || [ ! -f "$IPSW_FILE" ]; then
+        echo "Failed to locate the downloaded IPSW."
+        exit 1
+    fi
 fi
 
 IPSW_FILE="$(python3 - <<'PY' "$IPSW_FILE"

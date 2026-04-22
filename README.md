@@ -7,6 +7,7 @@ macOS GUI tool for downloading IPSWs, extracting carrier bundles, generating IPC
 - Native macOS window UI
 - Auto-detect connected iPhone model when possible
 - Query latest stable and beta builds
+- Manually choose a local IPSW file
 - Generate and organize IPCC files by region
 - Enable carrier testing automatically
 - Install or update `ipsw` from inside the app
@@ -33,7 +34,3 @@ macOS GUI tool for downloading IPSWs, extracting carrier bundles, generating IPC
 - `extract_all_ipcc.sh`: core extraction script
 - `extract_all_ipcc_zh.sh`: Chinese wrapper
 - `extract_all_ipcc_en.sh`: English wrapper
-
-## Credit
-
-creditor: github@hcy311
